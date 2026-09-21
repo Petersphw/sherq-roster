@@ -80,20 +80,19 @@ export async function DELETE(request: NextRequest) {
   const memberId = parseInt(id);
 
   try {
-    // 1. Remove their FUTURE scheduled slots (past completed talks stay for history)
-    await db.delete(rosterAssignments).where(
-      and(eq(rosterAssignments.memberId, memberId), eq(rosterAssignments.status, "scheduled"))
-    );
+    // 1. Unlink the member from all roster assignments (set memberId = null).
+    // NEVER delete any date row from roster_assignments! Keep all calendar dates and topics intact!
+    await db
+      .update(rosterAssignments)
+      .set({ memberId: null })
+      .where(eq(rosterAssignments.memberId, memberId));
 
-    // 2. Detach any other remaining references (no-talk, completed, etc.) so FK doesn't block
-    await db.update(rosterAssignments).set({ memberId: null }).where(eq(rosterAssignments.memberId, memberId));
-
-    // 3. Now delete the member
+    // 2. Now delete the member from members table
     await db.delete(members).where(eq(members.id, memberId));
 
     return NextResponse.json({ success: true });
   } catch (err) {
     console.error("Member delete failed:", err);
-    return NextResponse.json({ error: "Could not remove member — they may have history attached." }, { status: 500 });
+    return NextResponse.json({ error: "Could not remove member." }, { status: 500 });
   }
 }

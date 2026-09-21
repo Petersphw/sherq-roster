@@ -1,0 +1,100 @@
+diff --git a/src/app/RosterApp.tsx b/src/app/RosterApp.tsx
+index 4e2909c..f68e5c7 100644
+--- a/src/app/RosterApp.tsx
++++ b/src/app/RosterApp.tsx
+@@ -456,22 +456,26 @@ export default function RosterApp({
+   };
+ 
+   const toggleMem = async (m: Member) => {
++    if (!confirm(m.active
++      ? `Stand down ${m.name}?\n\nThey will stop appearing in future roster dates until reactivated.`
++      : `Reactivate ${m.name}?\n\nThey will rejoin the future roster rotation.`)) return;
+     await fetch("/api/members", {
+       method: "PUT",
+       headers: { "Content-Type": "application/json" },
+       body: JSON.stringify({ id: m.id, active: !m.active }),
+     });
+     await fetchMems();
+-    toast(`${m.name} ${m.active ? "stood down" : "back on deck"}`);
++    await rosterAction({ action: "reorder_regenerate" }, `${m.name} ${m.active ? "stood down" : "back on deck"} — roster updated ✓`);
+   };
+ 
+   const deleteMem = async (id: number) => {
+     const target = mems.find((m) => m.id === id);
+     if (target?.email === "PeterSM@sas.co.za") { toast("Developer cannot be removed"); return; }
+-    if (!confirm("Remove this crew member?")) return;
++    if (!confirm(`Remove ${target?.name || "this crew member"}?\n\nThey will be removed from the team and taken off all future roster dates. Past completed talks are kept.`)) return;
++    setMems((prev) => prev.filter((m) => m.id !== id)); // optimistic removal
+     await fetch(`/api/members?id=${id}`, { method: "DELETE" });
+-    await fetchMems();
+-    toast("Member removed");
++    // Regenerate future roster so their remaining slots are reassigned
++    await rosterAction({ action: "reorder_regenerate" }, `${target?.name || "Member"} removed and roster updated ✓`);
+   };
+ 
+   const toggleAdmin = async (member: Member) => {
+@@ -488,6 +492,7 @@ export default function RosterApp({
+   };
+ 
+   const updateMember = async (id: number, data: { name?: string; role?: string; email?: string; birthday?: string | null }) => {
++    const before = mems.find((m) => m.id === id);
+     await fetch("/api/members", {
+       method: "PUT",
+       headers: { "Content-Type": "application/json" },
+@@ -495,7 +500,14 @@ export default function RosterApp({
+     });
+     await fetchMems();
+     setEditingMember(null);
+-    toast("Member updated ✓");
++
++    // If the role changed to/from HOD, the presenter pool changed → regenerate future roster
++    const roleChanged = before?.role !== data.role;
++    if (roleChanged) {
++      await rosterAction({ action: "reorder_regenerate" }, "Member updated — roster regenerated ✓");
++    } else {
++      toast("Member updated ✓");
++    }
+   };
+ 
+   const saveAssignment = async (
+diff --git a/src/app/api/members/route.ts b/src/app/api/members/route.ts
+index 205defe..cc6a419 100644
+--- a/src/app/api/members/route.ts
++++ b/src/app/api/members/route.ts
+@@ -1,8 +1,8 @@
+ import { NextRequest, NextResponse } from "next/server";
+ import { db } from "@/db";
+ import { ensureTables } from "@/db/migrate";
+-import { members } from "@/db/schema";
+-import { eq } from "drizzle-orm";
++import { members, rosterAssignments } from "@/db/schema";
++import { eq, and, gt } from "drizzle-orm";
+ 
+ export async function GET() {
+   await ensureTables();
+@@ -77,6 +77,23 @@ export async function DELETE(request: NextRequest) {
+     return NextResponse.json({ error: "ID is required" }, { status: 400 });
+   }
+ 
+-  await db.delete(members).where(eq(members.id, parseInt(id)));
+-  return NextResponse.json({ success: true });
++  const memberId = parseInt(id);
++
++  try {
++    // 1. Remove their FUTURE scheduled slots (past completed talks stay for history)
++    await db.delete(rosterAssignments).where(
++      and(eq(rosterAssignments.memberId, memberId), eq(rosterAssignments.status, "scheduled"))
++    );
++
++    // 2. Detach any other remaining references (no-talk, completed, etc.) so FK doesn't block
++    await db.update(rosterAssignments).set({ memberId: null }).where(eq(rosterAssignments.memberId, memberId));
++
++    // 3. Now delete the member
++    await db.delete(members).where(eq(members.id, memberId));
++
++    return NextResponse.json({ success: true });
++  } catch (err) {
++    console.error("Member delete failed:", err);
++    return NextResponse.json({ error: "Could not remove member — they may have history attached." }, { status: 500 });
++  }
+ }

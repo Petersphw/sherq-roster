@@ -448,34 +448,38 @@ export default function RosterApp({
     });
     if (r.ok) {
       await fetchMems();
-      // Automatically resequence future roster so the new member joins the cycle
-      await rosterAction({ action: "reorder_regenerate" }, "Crew member added and roster updated ✓");
       setAddMem(false);
+      toast("Crew member added! 🎉");
       (e.target as HTMLFormElement).reset();
     }
   };
 
   const toggleMem = async (m: Member) => {
-    if (!confirm(m.active
-      ? `Stand down ${m.name}?\n\nThey will stop appearing in future roster dates until reactivated.`
-      : `Reactivate ${m.name}?\n\nThey will rejoin the future roster rotation.`)) return;
     await fetch("/api/members", {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ id: m.id, active: !m.active }),
     });
     await fetchMems();
-    await rosterAction({ action: "reorder_regenerate" }, `${m.name} ${m.active ? "stood down" : "back on deck"} — roster updated ✓`);
+    toast(`${m.name} ${m.active ? "stood down" : "back on deck"}`);
   };
 
   const deleteMem = async (id: number) => {
     const target = mems.find((m) => m.id === id);
     if (target?.email === "PeterSM@sas.co.za") { toast("Developer cannot be removed"); return; }
-    if (!confirm(`Remove ${target?.name || "this crew member"}?\n\nThey will be removed from the team and taken off all future roster dates. Past completed talks are kept.`)) return;
-    setMems((prev) => prev.filter((m) => m.id !== id)); // optimistic removal
+    if (!confirm(`Remove ${target?.name || "this member"} from the team?\n\nTheir name will be removed from assigned days (the dates remain intact). The rest of the roster will not be changed.`)) return;
+    
+    // Optimistically remove member from list and unassign their name from days
+    setMems((prev) => prev.filter((m) => m.id !== id));
+    setRoster((prev) => prev.map((r) => r.memberId === id ? { ...r, memberId: null, memberName: null } : r));
+    setDashboardRoster((prev) => prev.map((r) => r.memberId === id ? { ...r, memberId: null, memberName: null } : r));
+
     await fetch(`/api/members?id=${id}`, { method: "DELETE" });
-    // Regenerate future roster so their remaining slots are reassigned
-    await rosterAction({ action: "reorder_regenerate" }, `${target?.name || "Member"} removed and roster updated ✓`);
+    await fetchMems();
+    await fetchRoster(mo, yr);
+    await fetchDashboardRoster();
+    await fetchStats();
+    toast(`${target?.name || "Member"} removed — calendar dates kept intact ✓`);
   };
 
   const toggleAdmin = async (member: Member) => {
@@ -492,22 +496,16 @@ export default function RosterApp({
   };
 
   const updateMember = async (id: number, data: { name?: string; role?: string; email?: string; birthday?: string | null }) => {
-    const before = mems.find((m) => m.id === id);
     await fetch("/api/members", {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ id, ...data }),
     });
     await fetchMems();
+    await fetchRoster(mo, yr);
+    await fetchDashboardRoster();
     setEditingMember(null);
-
-    // If the role changed to/from HOD, the presenter pool changed → regenerate future roster
-    const roleChanged = before?.role !== data.role;
-    if (roleChanged) {
-      await rosterAction({ action: "reorder_regenerate" }, "Member updated — roster regenerated ✓");
-    } else {
-      toast("Member updated ✓");
-    }
+    toast("Member updated ✓");
   };
 
   const saveAssignment = async (
