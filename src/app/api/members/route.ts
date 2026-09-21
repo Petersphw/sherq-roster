@@ -1,8 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/db";
 import { ensureTables } from "@/db/migrate";
-import { members } from "@/db/schema";
-import { eq } from "drizzle-orm";
+import { members, rosterAssignments } from "@/db/schema";
+import { eq, and, gt } from "drizzle-orm";
 
 export async function GET() {
   await ensureTables();
@@ -77,6 +77,23 @@ export async function DELETE(request: NextRequest) {
     return NextResponse.json({ error: "ID is required" }, { status: 400 });
   }
 
-  await db.delete(members).where(eq(members.id, parseInt(id)));
-  return NextResponse.json({ success: true });
+  const memberId = parseInt(id);
+
+  try {
+    // 1. Remove their FUTURE scheduled slots (past completed talks stay for history)
+    await db.delete(rosterAssignments).where(
+      and(eq(rosterAssignments.memberId, memberId), eq(rosterAssignments.status, "scheduled"))
+    );
+
+    // 2. Detach any other remaining references (no-talk, completed, etc.) so FK doesn't block
+    await db.update(rosterAssignments).set({ memberId: null }).where(eq(rosterAssignments.memberId, memberId));
+
+    // 3. Now delete the member
+    await db.delete(members).where(eq(members.id, memberId));
+
+    return NextResponse.json({ success: true });
+  } catch (err) {
+    console.error("Member delete failed:", err);
+    return NextResponse.json({ error: "Could not remove member — they may have history attached." }, { status: 500 });
+  }
 }
